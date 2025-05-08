@@ -23,9 +23,12 @@
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ------- PIN SENSORI ANALOGICI. ------- //
+// ------- PIN SENSORI ANALOGICI ------- //
 #define PIN_SOIL 25
-#define PIN_PIOGGIA 35
+#define PIN_PIOGGIA 4
+
+// ------- AGGIUNTA: PIN SENSORE HALL ------- //
+#define HALL_PIN 2
 
 // --------- TEMPORIZZAZIONE -------- //
 unsigned long previousMillis = 0;
@@ -50,6 +53,16 @@ float press = 0;
 float gas = 0;
 int soilPercent = 0;
 int Rain = 0;
+
+// ------- AGGIUNTA: VARIABILI ANEMOMETRO ------- //
+volatile unsigned int hallCounter = 0;
+unsigned long lastHallCheck = 0;
+float windRPS = 0;
+
+// ------- AGGIUNTA: ISR SENSORE HALL ------- //
+void hallISR() {
+  hallCounter++;
+}
 
 void setup() {
     Serial.begin(115200);
@@ -92,7 +105,6 @@ void setup() {
     ltr.setResolution(LTR390_RESOLUTION_16BIT);
     ltr.enable(true);
 
-
     // ------- Inizializzazione BME688 ------- //
     if (!bme.begin()) {
         Serial.println("Errore: BME688 non trovato!");
@@ -110,10 +122,30 @@ void setup() {
         while (1);
     }
     Serial.println("RTC OK");
+
+    // ------- IMPOSTO LA LETTURA DELLA PIOGGIA ------- //
+    Serial.begin(115200);
+    pinMode(PIN_PIOGGIA, INPUT);
+
+    // ------- AGGIUNTA: INIZIALIZZAZIONE HALL SENSOR ------- //
+    pinMode(HALL_PIN, INPUT); // TODO: CAMBAIRE CON PULL DOWN, QUALCOSA DEL GENERE SE INVERTITO.
+    attachInterrupt(digitalPinToInterrupt(HALL_PIN), hallISR, RISING);
+
 }
 
 void loop() {
+
     unsigned long currentMillis = millis();
+
+    // ------- AGGIUNTA: CALCOLO VELOCITÀ VENTO OGNI 1 SECONDO ------- //
+    if (currentMillis - lastHallCheck >= 1000) {
+        lastHallCheck = currentMillis;
+        windRPS = hallCounter; // Giri al secondo.
+        hallCounter = 0;
+        Serial.print("Velocita' vento (RPS): ");
+        Serial.println(windRPS);
+    }
+
     if (currentMillis - previousMillis >= interval) {
         previousMillis = currentMillis;
 
@@ -145,18 +177,24 @@ void loop() {
         soilPercent = map(soilRaw, 4095, 900, 0, 100);
         soilPercent = constrain(soilPercent, 0, 100);
 
-        Rain = analogRead(PIN_PIOGGIA); // LETTURA PIOGGIA.
+        // Lettura del livello di PIOGGIA:
+        int pioggia = analogRead(PIN_PIOGGIA);
+        Serial.print("Livello pioggia: ");
+        Serial.println(pioggia);
 
         // --------- Invio dati via LoRa --------- //
         LoRa.beginPacket();
-        LoRa.print(UV); LoRa.print(",");
-        LoRa.print(Lux); LoRa.print(",");
-        LoRa.print(temp); LoRa.print(",");
-        LoRa.print(hum); LoRa.print(",");
-        LoRa.print(press); LoRa.print(",");
-        LoRa.print(gas); LoRa.print(",");
-        LoRa.print(soilPercent); LoRa.print(",");
-        LoRa.print(Rain);
+        LoRa.print("{");
+        LoRa.print("\"Uv\""); LoRa.print(":");LoRa.print(UV); LoRa.print(",");
+        LoRa.print("\"Lux\""); LoRa.print(":");LoRa.print(Lux); LoRa.print(",");
+        LoRa.print("\"Temp\""); LoRa.print(":");LoRa.print(temp); LoRa.print(",");
+        LoRa.print("\"Hum\""); LoRa.print(":");LoRa.print(hum); LoRa.print(",");
+        LoRa.print("\"Press\""); LoRa.print(":");LoRa.print(press); LoRa.print(",");
+        LoRa.print("\"Gas\""); LoRa.print(":");LoRa.print(gas); LoRa.print(",");
+        LoRa.print("\"SoilPercent\""); LoRa.print(":");LoRa.print(soilPercent); LoRa.print(",");
+        LoRa.print("\"Rain\""); LoRa.print(":");LoRa.print(Rain); LoRa.print(",");
+        LoRa.print("\"WindRPS\""); LoRa.print(":");LoRa.print(windRPS);
+        LoRa.print("}");
         LoRa.endPacket();
     }
 
@@ -181,7 +219,6 @@ void loop() {
             display.print(rtc.now().hour()); display.print(":");
             display.print(rtc.now().minute()); display.print(":");
             display.print(rtc.now().second());
-
 
             display.setCursor(0, 20);
             display.print("LUX: "); display.print(Lux); display.print(" - UV: "); display.print(UV);
@@ -228,10 +265,12 @@ void loop() {
 
             display.setCursor(0, 30);
             display.print("Pioggia: "); display.print(Rain);
+
+            // ------- AGGIUNTA: MOSTRA WIND ------- //
+            display.setCursor(0, 40);
+            display.print("Vento (RPS): "); display.print(windRPS);
         }
 
         display.display();
     }
 }
-
- 
