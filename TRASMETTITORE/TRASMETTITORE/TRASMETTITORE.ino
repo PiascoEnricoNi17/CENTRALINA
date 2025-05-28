@@ -1,276 +1,261 @@
-// ------- MODULI / LIBRERIE ------- //
+// ------------------ LIBRERIE ------------------ //
 #include <LoRa.h>
 #include <Wire.h>
 #include <SPI.h>
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_LTR390.h>  
-#include <Adafruit_BME680.h>  
-#include <RTClib.h>          
+#include <Adafruit_LTR390.h>
+#include <Adafruit_BME680.h>
+#include <RTClib.h>
 
-// ------- DEFINIZIONE PIN LoRa ------- //
+// ------------------ DEFINIZIONI HARDWARE ------------------ //
 #define SCK 5
 #define MISO 19
 #define MOSI 27
 #define SS 18
-#define RST 23  
+#define RST 23
 #define DIO0 26
 
-// ------- PIN DISPLAY OLED ------- //
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ------- PIN SENSORI ANALOGICI ------- //
 #define PIN_SOIL 25
 #define PIN_PIOGGIA 4
+#define HALL_PIN 13  // Cambiato da GPIO2 a GPIO13
 
-// ------- AGGIUNTA: PIN SENSORE HALL ------- //
-#define HALL_PIN 2
-
-// --------- TEMPORIZZAZIONE -------- //
-unsigned long previousMillis = 0;
-const long interval = 6000; 
-
-// Variabili per gestione schermate OLED
-int screen = 0;
-unsigned long screenPreviousMillis = 0;
-const long screenInterval = 3000; // Cambia schermata ogni 3 secondi
-
-// ------- ISTANZA SENSORI ------- //
+// ------------------ ISTANZE SENSORI ------------------ //
 Adafruit_LTR390 ltr = Adafruit_LTR390();
-Adafruit_BME680 bme;   
-RTC_DS3231 rtc;        
+Adafruit_BME680 bme;
+RTC_DS3231 rtc;
 
-// ------- VARIABILI GLOBALI ------- //
-uint32_t UV = 0;
+// ------------------ VARIABILI GLOBALI ------------------ //
+float UV = 0;
 uint32_t Lux = 0;
 float temp = 0;
 float hum = 0;
 float press = 0;
 float gas = 0;
 int soilPercent = 0;
-int Rain = 0;
+float rainMM = 0;
+float windSpeed = 0;
+float windSpeedKmh = 0;
 
-// ------- AGGIUNTA: VARIABILI ANEMOMETRO ------- //
 volatile unsigned int hallCounter = 0;
-unsigned long lastHallCheck = 0;
-float windRPS = 0;
+unsigned long lastWindCalc = 0;
+const float anemometerDiameter = 0.20;
+const float anemometerCircumference = anemometerDiameter * 3.1416;
 
-// ------- AGGIUNTA: ISR SENSORE HALL ------- //
-void hallISR() {
+unsigned long previousMillis = 0;
+const long sensorInterval = 6000;
+
+int screen = 0;
+unsigned long screenPreviousMillis = 0;
+const long screenInterval = 3000;
+
+unsigned long lastDebug = 0;
+
+// ------------------ INTERRUPT PER ANEMOMETRO ------------------ //
+void IRAM_ATTR hallISR() {
   hallCounter++;
 }
 
+// ------------------ SETUP ------------------ //
 void setup() {
-    Serial.begin(115200);
-    while (!Serial);
-    Serial.println("Avvio della stazione remota...");
+  Serial.begin(115200);
+  while (!Serial);
 
-    // ------- Inizializzazione display OLED
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-        Serial.println("Errore: Display OLED non trovato!");
-        while (1);
-    }
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("Avvio in corso...");
-    display.display();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Errore: Display OLED non trovato!");
+    while (1);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Avvio stazione meteo...");
+  display.display();
 
-    // ------- Inizializzazione LoRa ------- //
-    SPI.begin(SCK, MISO, MOSI, SS);
-    LoRa.setPins(SS, RST, DIO0);
-    delay(1000);
-    if (!LoRa.begin(868E6)) {
-        Serial.println("Errore: LoRa non inizializzato!");
-        return;
-    }
-    Serial.println("LoRa OK");
+  SPI.begin(SCK, MISO, MOSI, SS);
+  LoRa.setPins(SS, RST, DIO0);
+  if (!LoRa.begin(868E6)) {
+    Serial.println("Errore: LoRa non inizializzato!");
+    while (1);
+  }
 
-    // --------------------- SENROSI I2C ------------------- //
+  Wire.begin(21, 22);
+  if (!ltr.begin()) {
+    Serial.println("Errore: LTR-390 non trovato!");
+    while (1);
+  }
+  ltr.setGain(LTR390_GAIN_3);
+  ltr.setResolution(LTR390_RESOLUTION_16BIT);
+  ltr.enable(true);
 
-    // ------- Inizializzazione LTR-390 ------- //
-    Wire.begin(21, 22);
-    if (!ltr.begin()) {
-        Serial.println("Errore: LTR-390 non trovato!");
-        while (1);
-    }
-    Serial.println("LTR-390 OK");
-    ltr.setMode(LTR390_MODE_ALS);
-    ltr.setGain(LTR390_GAIN_3);
-    ltr.setResolution(LTR390_RESOLUTION_16BIT);
-    ltr.enable(true);
+  if (!bme.begin()) {
+    Serial.println("Errore: BME680 non trovato!");
+    while (1);
+  }
+  bme.setTemperatureOversampling(BME680_OS_8X);
+  bme.setHumidityOversampling(BME680_OS_2X);
+  bme.setPressureOversampling(BME680_OS_4X);
+  bme.setGasHeater(320, 150);
 
-    // ------- Inizializzazione BME688 ------- //
-    if (!bme.begin()) {
-        Serial.println("Errore: BME688 non trovato!");
-        while (1);
-    }
-    Serial.println("BME688 OK");
-    bme.setTemperatureOversampling(BME680_OS_8X);
-    bme.setHumidityOversampling(BME680_OS_2X);
-    bme.setPressureOversampling(BME680_OS_4X);
-    bme.setGasHeater(320, 150); 
+  if (!rtc.begin()) {
+    Serial.println("Errore: RTC non trovato!");
+    while (1);
+  }
 
-    // ------- Inizializzazione RTC ------- //
-    if (!rtc.begin()) {
-        Serial.println("Errore: RTC non trovato!");
-        while (1);
-    }
-    Serial.println("RTC OK");
-
-    // ------- IMPOSTO LA LETTURA DELLA PIOGGIA ------- //
-    Serial.begin(115200);
-    pinMode(PIN_PIOGGIA, INPUT);
-
-    // ------- AGGIUNTA: INIZIALIZZAZIONE HALL SENSOR ------- //
-    pinMode(HALL_PIN, INPUT); // TODO: CAMBAIRE CON PULL DOWN, QUALCOSA DEL GENERE SE INVERTITO.
-    attachInterrupt(digitalPinToInterrupt(HALL_PIN), hallISR, RISING);
-
+  pinMode(PIN_PIOGGIA, INPUT);
+  pinMode(HALL_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(HALL_PIN), hallISR, RISING);
 }
 
+// ------------------ LOOP PRINCIPALE ------------------ //
 void loop() {
+  unsigned long currentMillis = millis();
 
-    unsigned long currentMillis = millis();
+  // Debug temporaneo: stampa impulsi ogni 5 secondi
+  if (millis() - lastDebug >= 5000) {
+    lastDebug = millis();
+    Serial.print("[DEBUG] Impulsi Hall: ");
+    Serial.println(hallCounter);
+  }
 
-    // ------- AGGIUNTA: CALCOLO VELOCITÀ VENTO OGNI 1 SECONDO ------- //
-    if (currentMillis - lastHallCheck >= 1000) {
-        lastHallCheck = currentMillis;
-        windRPS = hallCounter; // Giri al secondo.
-        hallCounter = 0;
-        Serial.print("Velocita' vento (RPS): ");
-        Serial.println(windRPS);
+  // Calcolo velocità vento ogni secondo
+  if (currentMillis - lastWindCalc >= 1000) {
+    lastWindCalc = currentMillis;
+
+    float rps = hallCounter;
+    windSpeed = rps * anemometerCircumference;
+    windSpeedKmh = windSpeed * 3.6;
+
+    Serial.println("---- LOG VENTO ----");
+    Serial.print("Impulsi Hall: ");
+    Serial.println(hallCounter);
+    Serial.print("RPS (rotazioni/sec): ");
+    Serial.println(rps);
+    Serial.print("Velocità (m/s): ");
+    Serial.println(windSpeed, 2);
+    Serial.print("Velocità (km/h): ");
+    Serial.println(windSpeedKmh, 2);
+
+    hallCounter = 0;
+
+    if (windSpeedKmh == 0) {
+      windSpeedKmh = 0.1;
+      Serial.println("Fallback: vento impostato a 0.1 km/h");
+    }
+    Serial.println("--------------------");
+  }
+
+  // Lettura sensori ogni intervallo
+  if (currentMillis - previousMillis >= sensorInterval) {
+    previousMillis = currentMillis;
+
+    DateTime now = rtc.now();
+
+    ltr.setMode(LTR390_MODE_UVS);
+    UV = ltr.readUVS() / 100.0;
+    if (UV < 0.1) UV = 0.1;
+
+    ltr.setMode(LTR390_MODE_ALS);
+    Lux = ltr.readALS();
+
+    if (bme.performReading()) {
+      temp = bme.temperature;
+      hum = bme.humidity;
+      press = bme.pressure / 100.0;
+      gas = bme.gas_resistance / 1000.0;
     }
 
-    if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;
+    // Lettura umidità del suolo
+    int rawSoil = 0;
+    for (int i = 0; i < 10; i++) {
+      rawSoil += analogRead(PIN_SOIL);
+      delay(5);
+    }
+    rawSoil /= 10;
+    soilPercent = map(rawSoil, 3300, 1000, 0, 100);
+    soilPercent = constrain(soilPercent, 0, 100);
 
-        // --- Lettura dati --- //
-        DateTime now = rtc.now(); // DATA
+    // Lettura pioggia
+    int rawRain = analogRead(PIN_PIOGGIA);
+    int rainInverted = 4095 - rawRain;
+    rainMM = map(rainInverted, 1000, 3500, 0, 65);
+    rainMM = constrain(rainMM, 0, 65);
 
-        ltr.setMode(LTR390_MODE_UVS);
-        UV = ltr.readUVS(); // LUCE UV.
-
-        ltr.setMode(LTR390_MODE_ALS);
-        Lux = ltr.readALS(); // LUMINOSITA'.
-
-        // LETTURA BME: TEMP, HUM, PRSS, GAS.
-        if (bme.performReading()) {
-            temp = bme.temperature;
-            hum = bme.humidity;
-            press = bme.pressure / 100.0;
-            gas = bme.gas_resistance / 1000.0;
-        }
-
-        // LETTURA UMIDITA' TERRENO.
-        int soilRaw = 0;
-        int samples = 10;
-        for (int i = 0; i < samples; i++) {
-            soilRaw += analogRead(PIN_SOIL);
-            delay(5);
-        }
-        soilRaw /= samples;
-        soilPercent = map(soilRaw, 4095, 900, 0, 100);
-        soilPercent = constrain(soilPercent, 0, 100);
-
-        // Lettura del livello di PIOGGIA:
-        int pioggia = analogRead(PIN_PIOGGIA);
-        Serial.print("Livello pioggia: ");
-        Serial.println(pioggia);
-
-        // --------- Invio dati via LoRa --------- //
-        LoRa.beginPacket();
-        LoRa.print("{");
-        LoRa.print("\"Uv\""); LoRa.print(":");LoRa.print(UV); LoRa.print(",");
-        LoRa.print("\"Lux\""); LoRa.print(":");LoRa.print(Lux); LoRa.print(",");
-        LoRa.print("\"Temp\""); LoRa.print(":");LoRa.print(temp); LoRa.print(",");
-        LoRa.print("\"Hum\""); LoRa.print(":");LoRa.print(hum); LoRa.print(",");
-        LoRa.print("\"Press\""); LoRa.print(":");LoRa.print(press); LoRa.print(",");
-        LoRa.print("\"Gas\""); LoRa.print(":");LoRa.print(gas); LoRa.print(",");
-        LoRa.print("\"SoilPercent\""); LoRa.print(":");LoRa.print(soilPercent); LoRa.print(",");
-        LoRa.print("\"Rain\""); LoRa.print(":");LoRa.print(Rain); LoRa.print(",");
-        LoRa.print("\"WindRPS\""); LoRa.print(":");LoRa.print(windRPS);
-        LoRa.print("}");
-        LoRa.endPacket();
+    if(rainMM == 0.0)
+    {
+      rainMM = 0.1;
     }
 
-    // --------- Cambio schermata OLED ogni 3 secondi --------- //
-    if (currentMillis - screenPreviousMillis >= screenInterval) {
-        screenPreviousMillis = currentMillis;
-        screen = (screen + 1) % 2;  // Alterna tra 0 e 1
-        display.clearDisplay();
+    // Debug pioggia
+    Serial.print("Raw Rain: ");
+    Serial.print(rawRain);
+    Serial.print(" | Inverted: ");
+    Serial.print(rainInverted);
+    Serial.print(" | Rain mm: ");
+    Serial.println(rainMM);
 
-        if (screen == 0) {
-            // **Schermata 1: Dati ambientali**
-            display.setCursor(0, 0);
-            display.print("Data e Ora: ");
+    // Invio dati LoRa
+    LoRa.beginPacket();
+    LoRa.print("{");
+    LoRa.print("\"Uv\":"); LoRa.print(UV); LoRa.print(",");
+    LoRa.print("\"Lux\":"); LoRa.print(Lux); LoRa.print(",");
+    LoRa.print("\"Temp\":"); LoRa.print(temp); LoRa.print(",");
+    LoRa.print("\"Hum\":"); LoRa.print(hum); LoRa.print(",");
+    LoRa.print("\"Press\":"); LoRa.print(press); LoRa.print(",");
+    LoRa.print("\"Gas\":"); LoRa.print(gas); LoRa.print(",");
+    LoRa.print("\"SoilPercent\":"); LoRa.print(soilPercent); LoRa.print(",");
+    LoRa.print("\"Rain\":"); LoRa.print(rainMM); LoRa.print(",");
+    LoRa.print("\"Wind\":"); LoRa.print(windSpeedKmh);
+    LoRa.print("}");
+    LoRa.endPacket();
+  }
 
-            display.setCursor(0, 10);
-            display.print(rtc.now().day()); display.print("-");
-            display.print(rtc.now().month()); display.print("-");
-            display.print(rtc.now().year());
+  // Gestione schermate OLED
+  if (currentMillis - screenPreviousMillis >= screenInterval) {
+    screenPreviousMillis = currentMillis;
+    screen = (screen + 1) % 2;
+    display.clearDisplay();
 
-            display.print(" ");
+    if (screen == 0) {
+      DateTime now = rtc.now();
+      display.setCursor(0, 0);
+      display.print("Data: ");
+      display.print(now.day()); display.print("/");
+      display.print(now.month()); display.print(" ");
+      display.print(now.hour()); display.print(":");
+      display.print(now.minute());
 
-            display.print(rtc.now().hour()); display.print(":");
-            display.print(rtc.now().minute()); display.print(":");
-            display.print(rtc.now().second());
+      display.setCursor(0, 10);
+      display.print("LUX: "); display.print(Lux);
+      display.setCursor(0, 20);
+      display.print("UV: "); display.print(UV, 1);
 
-            display.setCursor(0, 20);
-            display.print("LUX: "); display.print(Lux); display.print(" - UV: "); display.print(UV);
+      display.setCursor(0, 30);
+      display.print("Temp: "); display.print(temp); display.print("C");
 
-            display.setCursor(0, 30);
-            display.print("Temperatura: "); display.print(temp); display.print("C");
+      display.setCursor(0, 40);
+      display.print("Hum: "); display.print(hum); display.print("%");
 
-            display.setCursor(0, 40);
-            display.print("Umidita': "); display.print(hum); display.print("%");
+      display.setCursor(0, 50);
+      display.print("Press: "); display.print(press); display.print("hPa");
 
-            display.setCursor(0, 50);
-            display.print("Pressione Atm: "); display.print(press); display.print("hPa");
-        } 
-        else {
-            // **Schermata 2: Gas, umidità suolo, pioggia, vento ecc...**
-            display.setCursor(0, 0);
-            if(gas > 200)
-            {
-              display.print("Concentrazione di Gas: "); 
-              display.setCursor(0, 10);
-              display.print("Nulla");
-            }
-            else if(gas > 50 && gas < 200)
-            {
-              display.print("Concentrazione Gas: "); 
-              display.setCursor(0, 10);
-              display.print("Normale.");
-            }
-            else if(gas < 50 && gas > 10)
-            {
-              display.print("Concentrazione Gas: "); 
-              display.setCursor(0, 10);
-              display.print("Alta (Area inquinata).");
-            }
-            else if(gas < 10)
-            {
-              display.print("Concentrazione Gas: ");
-              display.setCursor(0, 10);
-              display.print("Molto Alta (Pericoloso).");
-            }
-
-            display.setCursor(0, 20);
-            display.print("Umidita' Suolo: "); display.print(soilPercent); display.print("%");
-
-            display.setCursor(0, 30);
-            display.print("Pioggia: "); display.print(Rain);
-
-            // ------- AGGIUNTA: MOSTRA WIND ------- //
-            display.setCursor(0, 40);
-            display.print("Vento (RPS): "); display.print(windRPS);
-        }
-
-        display.display();
+    } else {
+      display.setCursor(0, 0);
+      display.print("Gas: ");
+      if (gas > 200)
+        display.print("OK");
+      else if (gas > 50)
+        display.print("Normale");
+      else
+        display.print("Scarso");
     }
+
+    display.display();
+  }
 }
